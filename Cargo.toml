@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rdirstat-core",
+    "crates/rdirstat-scan",
+    "crates/rdirstat-cli", "crates/rdirstat-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+authors = ["RDirStat Contributors"]
+description = "A fast Linux disk usage analyzer with treemap visualization"
+
+[workspace.dependencies]
+# Core
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Scanner
+jwalk = "0.8"
+rayon = "1.10"
+libc = "0.2"
+glob = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+humansize = "2"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"

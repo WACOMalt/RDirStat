@@ -1,0 +1,18 @@
+[package]
+name = "rdirstat-scan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fast parallel filesystem scanner for RDirStat"
+
+[dependencies]
+rdirstat-core = { path = "../rdirstat-core" }
+jwalk = { workspace = true }
+rayon = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+glob = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "rdirstat-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core data model for RDirStat disk usage analyzer"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
