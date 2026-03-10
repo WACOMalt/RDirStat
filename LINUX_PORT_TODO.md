@@ -82,6 +82,7 @@
 - [ ] Automatic backend selection (io_uring → sync fallback)
 - [ ] XFS `bulkstat` ioctl integration
 - [ ] btrfs `TREE_SEARCH` ioctl integration
+- [ ] Investigate direct NTFS MFT parsing on Linux block devices
 - [ ] Benchmark suite across backends and filesystems
 
 ---

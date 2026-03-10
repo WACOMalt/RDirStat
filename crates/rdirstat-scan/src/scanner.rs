@@ -9,7 +9,6 @@
 // 5. Hard link deduplication via (inode, device) set
 
 use std::collections::{HashMap, HashSet};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,6 +20,10 @@ use rdirstat_core::dir_tree::{DirTree, ScanStats};
 use rdirstat_core::file_info::{FileInfo, FileKind};
 
 use crate::options::ScanOptions;
+
+#[cfg(windows)]
+#[path = "scanner_windows.rs"]
+mod scanner_windows;
 
 /// Progress information updated during scanning
 #[derive(Debug)]
@@ -72,7 +75,7 @@ impl Scanner {
 
         // Get the device of the root path for filesystem boundary detection
         let root_meta = std::fs::metadata(&root_path)?;
-        let root_device = root_meta.dev();
+        let root_device = get_device_id(&root_meta).unwrap_or(0);
 
         // Phase 1: Walk the filesystem in parallel using jwalk, collecting all entries
         let entries = self.collect_entries(&root_path, root_device)?;
@@ -92,6 +95,20 @@ impl Scanner {
         root_path: &Path,
         root_device: u64,
     ) -> anyhow::Result<Vec<FileInfo>> {
+        #[cfg(windows)]
+        {
+            // If on Windows and Admin, attempt MFT!
+            if scanner_windows::is_admin() {
+                log::info!("Admin privileges detected. Attempting raw MFT scan...");
+                match scanner_windows::collect_entries_mft(&self.options, &self.progress, root_path) {
+                    Ok(entries) => return Ok(entries),
+                    Err(e) => log::warn!("MFT scan failed: {}. Falling back to standard recursive scan...", e),
+                }
+            } else {
+                log::info!("No Admin privileges. Using slow recursive scan.");
+            }
+        }
+
         let progress = self.progress.clone();
         let cross_fs = self.options.cross_filesystems;
         let follow_symlinks = self.options.follow_symlinks;
@@ -138,8 +155,12 @@ impl Scanner {
                         // Check filesystem boundary
                         if !cross_fs {
                             if let Ok(meta) = dir_entry.path().symlink_metadata() {
-                                if meta.dev() != root_device && meta.is_dir() {
-                                    dir_entry.read_children_path = None; // Don't cross
+                                if meta.is_dir() {
+                                    if let Some(dev) = get_device_id(&meta) {
+                                        if dev != root_device {
+                                            dir_entry.read_children_path = None; // Don't cross
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -273,14 +294,73 @@ fn assemble_tree(node: &mut FileInfo, children_map: &mut HashMap<PathBuf, Vec<Fi
 
 /// Convert std::fs::Metadata (via symlink_metadata) to our FileInfo
 fn metadata_to_file_info(path: &Path, meta: &std::fs::Metadata, depth: u32) -> FileInfo {
-    let kind = if meta.is_dir() {
+    let kind = get_file_kind(meta);
+
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| {
+            // Root directory case
+            path.to_string_lossy().to_string()
+        });
+
+    let mut fi = FileInfo::new(name, path.to_path_buf(), kind);
+    fi.size = meta.len();
+    
+    // We modify mtime here since it's available cross-platform, though returns SystemTime
+    fi.mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+    
+    populate_extra_metadata(&mut fi, meta);
+    fi.depth = depth;
+
+    fi
+}
+
+#[cfg(unix)]
+fn get_device_id(meta: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(meta.dev())
+}
+
+#[cfg(not(unix))]
+fn get_device_id(_meta: &std::fs::Metadata) -> Option<u64> {
+    None
+}
+
+#[cfg(unix)]
+fn populate_extra_metadata(fi: &mut FileInfo, meta: &std::fs::Metadata) {
+    use std::os::unix::fs::MetadataExt;
+    fi.allocated_size = meta.blocks() * 512;
+    fi.inode = meta.ino();
+    fi.device = meta.dev();
+    fi.nlinks = meta.nlink();
+    fi.mode = meta.mode();
+    fi.uid = meta.uid();
+    fi.gid = meta.gid();
+}
+
+#[cfg(not(unix))]
+fn populate_extra_metadata(fi: &mut FileInfo, meta: &std::fs::Metadata) {
+    // Windows fallback: allocated size is just the file size for now, no inode/device deduplication easily
+    fi.allocated_size = meta.len();
+    fi.inode = 0;
+    fi.device = 0;
+    fi.nlinks = 1;
+    fi.mode = 0;
+    fi.uid = 0;
+    fi.gid = 0;
+}
+
+#[cfg(unix)]
+fn get_file_kind(meta: &std::fs::Metadata) -> FileKind {
+    use std::os::unix::fs::MetadataExt;
+    if meta.is_dir() {
         FileKind::Directory
     } else if meta.is_symlink() {
         FileKind::Symlink
     } else if meta.is_file() {
         FileKind::File
     } else {
-        // Check for special file types via mode
         let mode = meta.mode();
         if (mode & libc::S_IFMT as u32) == libc::S_IFBLK as u32 {
             FileKind::BlockDevice
@@ -293,29 +373,20 @@ fn metadata_to_file_info(path: &Path, meta: &std::fs::Metadata, depth: u32) -> F
         } else {
             FileKind::Other
         }
-    };
+    }
+}
 
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| {
-            // Root directory case
-            path.to_string_lossy().to_string()
-        });
-
-    let mut fi = FileInfo::new(name, path.to_path_buf(), kind);
-    fi.size = meta.len();
-    fi.allocated_size = meta.blocks() * 512; // blocks are always 512-byte units
-    fi.mtime = meta.mtime();
-    fi.inode = meta.ino();
-    fi.device = meta.dev();
-    fi.nlinks = meta.nlink();
-    fi.mode = meta.mode();
-    fi.uid = meta.uid();
-    fi.gid = meta.gid();
-    fi.depth = depth;
-
-    fi
+#[cfg(not(unix))]
+fn get_file_kind(meta: &std::fs::Metadata) -> FileKind {
+    if meta.is_dir() {
+        FileKind::Directory
+    } else if meta.is_symlink() {
+        FileKind::Symlink
+    } else if meta.is_file() {
+        FileKind::File
+    } else {
+        FileKind::Other
+    }
 }
 
 #[cfg(test)]
