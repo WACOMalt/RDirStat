@@ -87,6 +87,12 @@ impl DirTree {
         self.root.top_n_dirs(n)
     }
 
+    /// Dynamically remove a node and its children from the tree, updating all parent sizes.
+    /// Returns the removed `FileInfo` if successful.
+    pub fn remove_node(&mut self, target: &std::path::Path) -> Option<FileInfo> {
+        self.root.remove_node(target)
+    }
+
     /// Serialize to JSON
     pub fn to_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)

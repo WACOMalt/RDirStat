@@ -12,6 +12,51 @@ use crate::color_map::category_color;
 
 use rdirstat_core::file_type::FileCategorizer;
 
+struct FilteredNode<'a> {
+    info: &'a FileInfo,
+    filtered_size: u64,
+    children: Vec<FilteredNode<'a>>,
+}
+
+impl<'a> FilteredNode<'a> {
+    fn build(node: &'a FileInfo, valid_exts: &std::collections::HashSet<String>) -> Option<Self> {
+        let mut children = Vec::new();
+        let mut filtered_size = 0;
+
+        if node.is_dir() {
+            for child in &node.children {
+                if let Some(filtered_child) = Self::build(child, valid_exts) {
+                    if !child.is_hardlink_duplicate {
+                        filtered_size += filtered_child.filtered_size;
+                    }
+                    children.push(filtered_child);
+                }
+            }
+            if filtered_size > 0 {
+                Some(Self {
+                    info: node,
+                    filtered_size,
+                    children,
+                })
+            } else {
+                None
+            }
+        } else {
+            // It's a file
+            let ext = node.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            if valid_exts.is_empty() || valid_exts.contains(&ext) {
+                Some(Self {
+                    info: node,
+                    filtered_size: node.size,
+                    children: Vec::new(),
+                })
+            } else {
+                None
+            }
+        }
+    }
+}
+
 pub fn ui(ui: &mut egui::Ui, tree: &Arc<DirTree>, state: &mut TreeViewState) {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     
@@ -124,9 +169,26 @@ pub fn ui(ui: &mut egui::Ui, tree: &Arc<DirTree>, state: &mut TreeViewState) {
             texture: ui.ctx().load_texture("treemap_cache", placeholder, egui::TextureOptions::NEAREST),
         };
 
-        if treemap_root.total_size > 0 {
+        let valid_exts: std::collections::HashSet<String> = state.extension_filter
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Build the FilteredNode shadow tree
+        let filtered_root = if let Some(root) = FilteredNode::build(treemap_root, &valid_exts) {
+            root
+        } else {
+            FilteredNode {
+                info: treemap_root,
+                filtered_size: 0,
+                children: Vec::new(),
+            }
+        };
+
+        if filtered_root.filtered_size > 0 {
             layout_and_build_cache(
-                treemap_root,
+                &filtered_root,
                 rect,
                 &mut new_cache,
                 &mut pixels,
@@ -216,7 +278,7 @@ fn find_node<'a>(node: &'a FileInfo, target_path: &std::path::Path) -> Option<&'
 }
 
 fn layout_and_build_cache(
-    node: &FileInfo,
+    node: &FilteredNode,
     rect: egui::Rect,
     cache: &mut TreemapCache,
     pixels: &mut [egui::Color32],
@@ -225,46 +287,46 @@ fn layout_and_build_cache(
     ft: &FileCategorizer,
 ) {
     // Always add this node to the lookup map
-    cache.rect_map.insert(node.path.clone(), rect);
+    cache.rect_map.insert(node.info.path.clone(), rect);
 
     if rect.width() < 1.0 || rect.height() < 1.0 {
-        let ext = node.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext = node.info.path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let cat = ft.categorize(&ext.to_lowercase());
         let color = category_color(&cat, ext);
 
         cache.nodes.push(CachedNode {
             rect,
-            path: node.path.clone(),
-            is_dir: node.is_dir(),
-            name: node.name.clone(),
-            size: node.total_size,
+            path: node.info.path.clone(),
+            is_dir: node.info.is_dir(),
+            name: node.info.name.clone(),
+            size: node.filtered_size,
         });
         
         fill_rect(pixels, width, height, rect, cache.rect, color);
         return;
     }
 
-    if node.is_file() || node.children.is_empty() {
-        let ext = node.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if node.info.is_file() || node.children.is_empty() {
+        let ext = node.info.path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let cat = ft.categorize(&ext.to_lowercase());
         let color = category_color(&cat, ext);
 
         cache.nodes.push(CachedNode {
             rect,
-            path: node.path.clone(),
-            is_dir: node.is_dir(),
-            name: node.name.clone(),
-            size: node.total_size,
+            path: node.info.path.clone(),
+            is_dir: node.info.is_dir(),
+            name: node.info.name.clone(),
+            size: node.filtered_size,
         });
 
         fill_rect(pixels, width, height, rect, cache.rect, color);
     } else {
         cache.nodes.push(CachedNode {
             rect,
-            path: node.path.clone(),
-            is_dir: node.is_dir(),
-            name: node.name.clone(),
-            size: node.total_size,
+            path: node.info.path.clone(),
+            is_dir: node.info.is_dir(),
+            name: node.info.name.clone(),
+            size: node.filtered_size,
         });
 
         // Directory node - layout children
@@ -272,7 +334,7 @@ fn layout_and_build_cache(
         // This avoids empty space caused by directory metadata sizes (self.size),
         // and safely ignores hardlink duplicates whose size wasn't added to the parent's total.
         let layout_total = node.children.iter()
-            .map(|c| if c.is_hardlink_duplicate { 0 } else { c.total_size })
+            .map(|c| if c.info.is_hardlink_duplicate { 0 } else { c.filtered_size })
             .sum::<u64>() as f32;
 
         if layout_total <= 0.0 {
@@ -285,8 +347,8 @@ fn layout_and_build_cache(
         
         // Simple slice-and-dice layout for now (Squarified is complex, let's start with slice-and-dice alternating)
         // Sort children by size descending
-        let mut children: Vec<&FileInfo> = node.children.iter().collect();
-        children.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+        let mut children: Vec<&FilteredNode> = node.children.iter().collect();
+        children.sort_by(|a, b| b.filtered_size.cmp(&a.filtered_size));
 
         // Squarified layout algorithm (Bruls et al.)
         let mut remaining_total = layout_total;
@@ -302,7 +364,7 @@ fn layout_and_build_cache(
             let shortest_edge = current_rect.width().min(current_rect.height());
 
             for j in idx..children.len() {
-                let child_size = if children[j].is_hardlink_duplicate { 0.0 } else { children[j].total_size as f32 };
+                let child_size = if children[j].info.is_hardlink_duplicate { 0.0 } else { children[j].filtered_size as f32 };
                 if child_size == 0.0 {
                     row_count += 1;
                     continue;
@@ -315,7 +377,7 @@ fn layout_and_build_cache(
                 // Calculate worst aspect ratio in the proposed row
                 let mut worst_ratio: f32 = 0.0;
                 for k in idx..=j {
-                    let cs = if children[k].is_hardlink_duplicate { 0.0 } else { children[k].total_size as f32 };
+                    let cs = if children[k].info.is_hardlink_duplicate { 0.0 } else { children[k].filtered_size as f32 };
                     if cs > 0.0 {
                         let length = shortest_edge * (cs / new_row_size);
                         let ratio = if thickness > length { thickness / length } else { length / thickness };
@@ -336,7 +398,7 @@ fn layout_and_build_cache(
 
             if row_count == 0 {
                 row_count = 1; // Fallback to prevent infinite loop
-                let child_size = if children[idx].is_hardlink_duplicate { 0.0 } else { children[idx].total_size as f32 };
+                let child_size = if children[idx].info.is_hardlink_duplicate { 0.0 } else { children[idx].filtered_size as f32 };
                 row_size = child_size;
             }
 
@@ -359,7 +421,7 @@ fn layout_and_build_cache(
             let mut pos = if is_horizontal { row_rect.min.y } else { row_rect.min.x };
             for j in idx..(idx + row_count) {
                 let child = children[j];
-                let child_size = if child.is_hardlink_duplicate { 0.0 } else { child.total_size as f32 };
+                let child_size = if child.info.is_hardlink_duplicate { 0.0 } else { child.filtered_size as f32 };
                 if child_size > 0.0 {
                     let child_ratio = child_size / row_size;
                     

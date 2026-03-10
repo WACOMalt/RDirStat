@@ -21,3 +21,5 @@ egui_extras = { version = "0.27", features = ["all_loaders"] }
 rfd = "0.14" # Native file dialogs
 humansize = "2.1"
 crossbeam-channel = "0.5" # For background thread communication
+trash = "5.2.5"
+sudo = "0.6.0"

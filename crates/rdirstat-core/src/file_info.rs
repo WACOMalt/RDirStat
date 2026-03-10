@@ -244,6 +244,53 @@ impl FileInfo {
             child.collect_dirs(out);
         }
     }
+
+    /// Recursively attempt to find and remove a valid node by its path.
+    /// If found, it removes the node from the `children` vector, adjusts its own aggregated totals,
+    /// and returns the removed node so the caller (parent) can also adjust its totals.
+    pub fn remove_node(&mut self, target: &std::path::Path) -> Option<FileInfo> {
+        // Check if the target is a direct child
+        if let Some(idx) = self.children.iter().position(|c| c.path == target) {
+            let removed = self.children.remove(idx);
+            
+            // Adjust current node's aggregated sizes
+            if !removed.is_hardlink_duplicate {
+                self.total_size = self.total_size.saturating_sub(removed.total_size);
+                self.total_allocated_size = self.total_allocated_size.saturating_sub(removed.total_allocated_size);
+            }
+            self.total_files = self.total_files.saturating_sub(removed.total_files);
+            self.total_dirs = self.total_dirs.saturating_sub(removed.total_dirs);
+            if removed.is_dir() {
+                self.total_dirs = self.total_dirs.saturating_sub(1);
+            }
+            self.total_entries = self.total_entries.saturating_sub(removed.total_entries);
+            
+            return Some(removed);
+        }
+
+        // Otherwise recurse down the correct path
+        for child in &mut self.children {
+            if target.starts_with(&child.path) {
+                if let Some(removed) = child.remove_node(target) {
+                    // One of our children successfully removed the node, we must also subtract the sizes
+                    if !removed.is_hardlink_duplicate {
+                        self.total_size = self.total_size.saturating_sub(removed.total_size);
+                        self.total_allocated_size = self.total_allocated_size.saturating_sub(removed.total_allocated_size);
+                    }
+                    self.total_files = self.total_files.saturating_sub(removed.total_files);
+                    self.total_dirs = self.total_dirs.saturating_sub(removed.total_dirs);
+                    if removed.is_dir() {
+                        self.total_dirs = self.total_dirs.saturating_sub(1);
+                    }
+                    self.total_entries = self.total_entries.saturating_sub(removed.total_entries);
+                    
+                    return Some(removed);
+                }
+            }
+        }
+
+        None
+    }
 }
 
 /// Format bytes into human-readable string

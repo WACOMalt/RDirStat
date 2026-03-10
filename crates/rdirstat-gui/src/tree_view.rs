@@ -33,6 +33,8 @@ pub struct TreeViewState {
     pub selected_path: Option<PathBuf>,
     pub double_clicked_path: Option<PathBuf>,
     pub treemap_cache: Option<TreemapCache>,
+    pub show_filters_panel: bool,
+    pub extension_filter: String,
 }
 
 impl TreeViewState {
@@ -41,6 +43,7 @@ impl TreeViewState {
         self.selected_path = None;
         self.double_clicked_path = None;
         self.treemap_cache = None;
+        self.extension_filter.clear();
     }
 }
 
